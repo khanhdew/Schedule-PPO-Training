@@ -1,5 +1,6 @@
 """
 PPO Training Pipeline - Main Entry Point
+Using Rating-based Rewards (No Reward Model Training)
 """
 import logging
 import sys
@@ -8,7 +9,7 @@ from pathlib import Path
 
 from config import settings
 from data import extractor, preprocessor
-from models import RewardModelTrainer, PPOModelTrainer
+from models import PPOModelTrainer
 from deploy import deployer
 
 # Setup logging
@@ -33,7 +34,7 @@ def run_pipeline(
     dry_run: bool = False
 ) -> bool:
     """
-    Run the full PPO training pipeline
+    Run the PPO training pipeline with rating-based rewards
     
     Args:
         skip_deploy: Skip HuggingFace deployment
@@ -46,10 +47,11 @@ def run_pipeline(
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     logger.info(f"{'='*50}")
     logger.info(f"🚀 PPO Training Pipeline - Run ID: {run_id}")
+    logger.info(f"📊 Using rating-based rewards (no reward model)")
     logger.info(f"{'='*50}")
     
     try:
-        # Step 1: Extract feedback data
+        # Step 1: Extract and prepare feedback data
         logger.info("\n📊 Step 1: Extracting feedback data...")
         
         if not extractor.test_connection():
@@ -62,73 +64,40 @@ def run_pipeline(
             logger.warning("⚠️ No feedback data found")
             return False
         
-        # Preprocess
+        # Clean and prepare for PPO
         feedback_df = preprocessor.clean_feedback(feedback_df)
-        preference_pairs = preprocessor.create_preference_pairs(feedback_df)
+        ppo_samples = preprocessor.prepare_for_ppo(feedback_df)
         
         # Check minimum samples
         min_samples = settings.training.min_feedback_samples
-        if len(preference_pairs) < min_samples:
-            logger.warning(f"⚠️ Not enough samples: {len(preference_pairs)} < {min_samples}")
+        if len(ppo_samples) < min_samples:
+            logger.warning(f"⚠️ Not enough samples: {len(ppo_samples)} < {min_samples}")
             logger.info("⏭️ Skipping training. Waiting for more feedback.")
             return False
         
-        logger.info(f"✅ Step 1 complete: {len(preference_pairs)} preference pairs")
+        logger.info(f"✅ Step 1 complete: {len(ppo_samples)} rated samples")
         
         if dry_run:
             logger.info("🏃 Dry run mode - skipping training")
             return True
         
-        # Step 2: Train Reward Model
-        logger.info("\n🎯 Step 2: Training Reward Model...")
-        
-        reward_trainer = RewardModelTrainer(output_dir="./outputs/reward_model")
-        reward_model_path = reward_trainer.train(preference_pairs)
-        
-        logger.info(f"✅ Step 2 complete: Reward model at {reward_model_path}")
-        
-        # Step 2.5: Score unrated responses (optional)
-        logger.info("\n📝 Scoring unrated responses...")
-        
-        unrated_df = extractor.extract_unrated(limit=500)
-        if len(unrated_df) > 0:
-            reward_trainer.load_trained_model(reward_model_path)
-            
-            scored = []
-            for _, row in unrated_df.iterrows():
-                if row.get('question') and row.get('answer'):
-                    score = reward_trainer.score_response(row['question'], row['answer'])
-                    scored.append({
-                        'chat_id': row['chat_id'],
-                        'message_id': row['message_id'],
-                        'score': score
-                    })
-            
-            logger.info(f"📊 Scored {len(scored)} unrated responses")
-        
-        # Step 3: Train PPO
-        logger.info("\n🚀 Step 3: Training PPO...")
-        
-        # Get unique questions for PPO training
-        questions = list(set([
-            row['question'] for row in feedback_df.to_dict('records')
-            if row.get('question')
-        ]))
+        # Step 2: Train PPO directly with rating-based rewards
+        logger.info("\n🚀 Step 2: Training PPO with rating-based rewards...")
         
         ppo_trainer = PPOModelTrainer(output_dir="./outputs/ppo_model")
-        ppo_model_path = ppo_trainer.train(questions, reward_model_path)
+        ppo_model_path = ppo_trainer.train(ppo_samples)
         
-        logger.info(f"✅ Step 3 complete: PPO model at {ppo_model_path}")
+        logger.info(f"✅ Step 2 complete: PPO model at {ppo_model_path}")
         
-        # Step 4: Deploy to HuggingFace
+        # Step 3: Deploy to HuggingFace
         if not skip_deploy:
-            logger.info("\n☁️ Step 4: Deploying to HuggingFace...")
+            logger.info("\n☁️ Step 3: Deploying to HuggingFace...")
             
             url = deployer.deploy(ppo_model_path)
             
-            logger.info(f"✅ Step 4 complete: Model at {url}")
+            logger.info(f"✅ Step 3 complete: Model at {url}")
         else:
-            logger.info("\n⏭️ Step 4: Skipping deployment (--skip-deploy)")
+            logger.info("\n⏭️ Step 3: Skipping deployment (--skip-deploy)")
         
         # Done
         logger.info(f"\n{'='*50}")

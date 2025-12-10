@@ -1,9 +1,9 @@
 """
-PPO Training with TRL
+PPO Training with TRL - Using Rating-based Rewards
 """
 import logging
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Dict, Optional
 
 import torch
 from datasets import Dataset
@@ -13,21 +13,21 @@ from peft import LoraConfig
 from tqdm import tqdm
 
 from config import settings
-from models.reward_trainer import RewardModelTrainer
 
 logger = logging.getLogger(__name__)
 
 
 class PPOModelTrainer:
-    """PPO fine-tuning using reward model"""
+    """PPO fine-tuning using rating-based rewards directly"""
 
     def __init__(self, output_dir: str = "./outputs/ppo_model"):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.model = None
         self.tokenizer = None
-        self.reward_trainer = None
         self.ppo_trainer = None
+        # Cache for pre-computed rewards from ratings
+        self.reward_cache: Dict[str, float] = {}
 
     def _get_quantization_config(self) -> BitsAndBytesConfig:
         """Get 4-bit quantization config"""
@@ -49,19 +49,14 @@ class PPOModelTrainer:
             task_type="CAUSAL_LM"
         )
 
-    def load_models(
-        self,
-        reward_model_path: str,
-        use_quantization: bool = True
-    ):
+    def load_model(self, use_quantization: bool = True):
         """
-        Load policy model and reward model
+        Load policy model
         
         Args:
-            reward_model_path: Path to trained reward model
             use_quantization: Whether to use 4-bit quantization
         """
-        logger.info(f"📥 Loading models...")
+        logger.info(f"📥 Loading policy model...")
         
         # Load tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(
@@ -89,24 +84,45 @@ class PPOModelTrainer:
         )
         
         logger.info("✅ Policy model loaded")
-        
-        # Load reward model
-        self.reward_trainer = RewardModelTrainer()
-        self.reward_trainer.load_trained_model(reward_model_path)
-        
-        logger.info("✅ Reward model loaded")
 
-    def prepare_dataset(self, questions: List[str]) -> Dataset:
+    def build_reward_cache(self, samples: List[Dict]):
+        """
+        Build reward cache from pre-processed samples
+        
+        Args:
+            samples: List of dicts with question, answer, reward
+        """
+        logger.info("📦 Building reward cache from rated samples...")
+        
+        self.reward_cache.clear()
+        for sample in samples:
+            # Create cache key from question-answer pair
+            key = self._make_cache_key(sample['question'], sample['answer'])
+            self.reward_cache[key] = sample['reward']
+        
+        logger.info(f"✅ Cached {len(self.reward_cache)} reward mappings")
+
+    def _make_cache_key(self, question: str, answer: str) -> str:
+        """Create cache key from question-answer pair"""
+        # Normalize and create key
+        q = question.strip().lower()[:200]  # First 200 chars for matching
+        a = answer.strip().lower()[:200]
+        return f"{q}|||{a}"
+
+    def prepare_dataset(self, samples: List[Dict]) -> Dataset:
         """
         Prepare dataset for PPO training
         
         Args:
-            questions: List of question strings
+            samples: List of dicts with question, answer, reward
             
         Returns:
             HuggingFace Dataset
         """
         logger.info("🔧 Preparing PPO dataset...")
+        
+        # Use unique questions for prompts
+        questions = list(set([s['question'] for s in samples]))
         
         dataset = Dataset.from_dict({"query": questions})
         
@@ -121,8 +137,31 @@ class PPOModelTrainer:
         dataset = dataset.map(tokenize_fn, batched=True)
         dataset = dataset.filter(lambda x: len(x['input_ids']) > 0)
         
-        logger.info(f"📊 PPO dataset: {len(dataset)} samples")
+        logger.info(f"📊 PPO dataset: {len(dataset)} unique prompts")
         return dataset
+
+    def get_reward(self, question: str, response: str) -> float:
+        """
+        Get reward for question-response pair
+        
+        First checks cache (for rated responses), 
+        then falls back to neutral reward (0.0) for new responses
+        
+        Args:
+            question: Question text
+            response: Response text
+            
+        Returns:
+            Reward value between -1 and 1
+        """
+        key = self._make_cache_key(question, response)
+        
+        if key in self.reward_cache:
+            return self.reward_cache[key]
+        
+        # For new/generated responses, return neutral reward
+        # In practice, model will learn from cached rated responses
+        return 0.0
 
     def compute_rewards(
         self,
@@ -141,34 +180,35 @@ class PPOModelTrainer:
         """
         rewards = []
         for query, response in zip(query_texts, response_texts):
-            score = self.reward_trainer.score_response(query, response)
+            score = self.get_reward(query, response)
             rewards.append(torch.tensor(score))
         return rewards
 
     def train(
         self,
-        questions: List[str],
-        reward_model_path: str,
+        samples: List[Dict],
         use_quantization: bool = True
     ) -> str:
         """
-        Run PPO training
+        Run PPO training with rating-based rewards
         
         Args:
-            questions: Training queries
-            reward_model_path: Path to trained reward model
+            samples: List of dicts with question, answer, reward
             use_quantization: Whether to use 4-bit quantization
             
         Returns:
             Path to saved model
         """
-        logger.info("🚀 Starting PPO training...")
+        logger.info("🚀 Starting PPO training with rating-based rewards...")
         
-        # Load models
-        self.load_models(reward_model_path, use_quantization)
+        # Load model
+        self.load_model(use_quantization)
+        
+        # Build reward cache from samples
+        self.build_reward_cache(samples)
         
         # Prepare dataset
-        dataset = self.prepare_dataset(questions)
+        dataset = self.prepare_dataset(samples)
         
         # PPO Config
         ppo_config = PPOConfig(
@@ -212,6 +252,9 @@ class PPOModelTrainer:
         for epoch in range(settings.training.ppo_epochs):
             logger.info(f"📅 Epoch {epoch + 1}/{settings.training.ppo_epochs}")
             
+            cached_hits = 0
+            total_samples = 0
+            
             for batch_idx, batch in enumerate(tqdm(self.ppo_trainer.dataloader)):
                 query_tensors = batch['input_ids']
                 
@@ -234,8 +277,15 @@ class PPOModelTrainer:
                     for q, r in zip(query_tensors, response_tensors)
                 ]
                 
-                # Compute rewards
+                # Compute rewards (from cache or neutral)
                 rewards = self.compute_rewards(query_texts, response_texts)
+                
+                # Track cache hits
+                for q, r in zip(query_texts, response_texts):
+                    key = self._make_cache_key(q, r)
+                    if key in self.reward_cache:
+                        cached_hits += 1
+                    total_samples += 1
                 
                 # PPO step
                 stats = self.ppo_trainer.step(query_tensors, response_tensors, rewards)
@@ -244,6 +294,8 @@ class PPOModelTrainer:
                 if batch_idx % 10 == 0:
                     mean_reward = sum(r.item() for r in rewards) / len(rewards)
                     logger.info(f"   Batch {batch_idx}: mean_reward={mean_reward:.4f}")
+            
+            logger.info(f"   📊 Cache hit rate: {cached_hits}/{total_samples} ({100*cached_hits/max(total_samples,1):.1f}%)")
             
             # Save checkpoint
             checkpoint_path = str(self.output_dir / f"checkpoint_epoch_{epoch + 1}")

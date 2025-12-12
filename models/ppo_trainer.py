@@ -179,7 +179,14 @@ class PPOModelTrainer:
         dataset = dataset.map(tokenize_fn, batched=True)
         dataset = dataset.filter(lambda x: len(x['input_ids']) > 0)
         
+        # Remove the query column - only keep tokenized columns
+        dataset = dataset.remove_columns(['query'])
+        
+        # Set format for PyTorch
+        dataset.set_format(type='torch', columns=['input_ids', 'attention_mask'])
+        
         logger.info(f"📊 PPO dataset: {len(dataset)} unique prompts")
+        logger.info(f"   📋 Columns: {dataset.column_names}")
         return dataset
 
     def get_reward(self, question: str, response: str) -> float:

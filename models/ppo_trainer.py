@@ -109,15 +109,31 @@ class PPOModelTrainer:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         self.tokenizer.padding_side = "left"
         
+        # Create offload folder
+        offload_dir = Path("./offload_temp")
+        offload_dir.mkdir(exist_ok=True)
+        
         # Policy model kwargs
         model_kwargs = {
-            "device_map": "auto",
             "trust_remote_code": True,
-            "peft_config": self._get_lora_config()
+            "peft_config": self._get_lora_config(),
+            "offload_folder": str(offload_dir)
         }
         
         if use_quantization and torch.cuda.is_available():
-            model_kwargs["quantization_config"] = self._get_quantization_config()
+            # Use 4-bit with CPU offload support
+            quantization_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.float16,
+                bnb_4bit_use_double_quant=True,
+                llm_int8_enable_fp32_cpu_offload=True
+            )
+            model_kwargs["quantization_config"] = quantization_config
+            # Use cuda:0 as main device, allow CPU offload
+            model_kwargs["device_map"] = "auto"
+        else:
+            model_kwargs["device_map"] = "auto"
         
         # Load policy model with value head
         self.model = AutoModelForCausalLMWithValueHead.from_pretrained(

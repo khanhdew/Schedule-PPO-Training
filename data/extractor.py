@@ -88,8 +88,8 @@ class DataExtractor:
         Returns:
             DataFrame with feedback records
         """
-        logger.info("📊 Extracting feedback data...")
-        logger.info(f"   🔗 DB: {self.config.host}:{self.config.port}/{self.config.name}")
+        print("📊 Extracting feedback data...")  # Use print for notebook
+        print(f"   🔗 DB: {self.config.host}:{self.config.port}/{self.config.name}")
         
         conn = self.get_connection()
         cursor = conn.cursor()
@@ -97,7 +97,7 @@ class DataExtractor:
         # First, let's check how many chats exist
         cursor.execute("SELECT COUNT(*) as cnt FROM chat")
         chat_count = cursor.fetchone()['cnt']
-        logger.info(f"   📁 Total chats in database: {chat_count}")
+        print(f"   📁 Total chats in database: {chat_count}")
         
         # Check if any messages have annotations
         check_query = """
@@ -108,23 +108,23 @@ class DataExtractor:
         """
         cursor.execute(check_query)
         annotation_count = cursor.fetchone()['cnt']
-        logger.info(f"   📝 Messages with annotations: {annotation_count}")
+        print(f"   📝 Messages with annotations: {annotation_count}")
         
-        # Also check the structure - let's see a sample message
+        # Also check the structure - let's see a sample annotated message
         sample_query = """
         SELECT 
             message.value::json as msg_json
         FROM chat t 
         CROSS JOIN LATERAL json_each(t.chat::json#>'{history, messages}') as message
-        WHERE message.value::json->>'role' = 'assistant'
+        WHERE message.value::json->'annotation' IS NOT NULL
         LIMIT 1
         """
         cursor.execute(sample_query)
         sample = cursor.fetchone()
         if sample:
-            logger.info(f"   🔍 Sample assistant message structure: {str(sample['msg_json'])[:500]}...")
+            print(f"   🔍 Sample annotated message: {str(sample['msg_json'])[:500]}...")
         else:
-            logger.warning("   ⚠️ No assistant messages found in database")
+            print("   ⚠️ No annotated messages found!")
         
         query = FEEDBACK_QUERY
         if days_back:
@@ -134,29 +134,23 @@ class DataExtractor:
                 f"AND to_timestamp((message.value::json->>'timestamp')::bigint) > '{cutoff}'\nORDER BY datetime DESC"
             )
         
-        logger.info(f"   📜 Running query:\n{query[:500]}...")
-        
         df = pd.read_sql(query, conn)
         cursor.close()
         conn.close()
         
-        logger.info(f"📊 Extracted {len(df)} feedback records")
+        print(f"📊 Extracted {len(df)} feedback records")
         
         # Debug: Show raw data from pandas
         if len(df) > 0:
-            logger.info(f"   📋 Columns: {list(df.columns)}")
-            logger.info(f"   🔍 First 3 rows RAW DATA:")
+            print(f"   📋 Columns: {list(df.columns)}")
+            print(f"   🔍 First 3 rows RAW DATA:")
             for idx, row in df.head(3).iterrows():
-                logger.info(f"      Row {idx}:")
-                logger.info(f"         rating: {repr(row.get('rating', 'N/A'))}")
-                logger.info(f"         question: {repr(str(row.get('question', 'N/A'))[:50])}")
-                logger.info(f"         answer: {repr(str(row.get('answer', 'N/A'))[:50])}")
-            logger.info(f"   📋 Sample ratings: {df['rating'].value_counts().to_dict() if 'rating' in df.columns else 'N/A'}")
+                print(f"      Row {idx}:")
+                print(f"         rating: {repr(row.get('rating', 'N/A'))}")
+                print(f"         question: {repr(str(row.get('question', 'N/A'))[:80])}")
+                print(f"         answer: {repr(str(row.get('answer', 'N/A'))[:80])}")
         else:
-            logger.warning("   ⚠️ No feedback records found! Check:")
-            logger.warning("      1. Are there any annotations in the database?")
-            logger.warning("      2. Is the JSON structure correct?")
-            logger.warning("      3. Try running FEEDBACK_QUERY manually in psql")
+            print("   ⚠️ No feedback records found!")
         
         return df
 

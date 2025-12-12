@@ -13,7 +13,7 @@ from typing import List, Dict, Optional
 
 import torch
 from datasets import Dataset
-from transformers import AutoTokenizer, BitsAndBytesConfig
+from transformers import AutoTokenizer, BitsAndBytesConfig, DataCollatorWithPadding
 from peft import LoraConfig
 from tqdm import tqdm
 
@@ -264,13 +264,21 @@ class PPOModelTrainer:
             seed=42,
         )
         
+        # Create data collator for padding
+        data_collator = DataCollatorWithPadding(
+            tokenizer=self.tokenizer,
+            padding=True,
+            return_tensors="pt"
+        )
+        
         # Initialize trainer
         self.ppo_trainer = PPOTrainer(
             config=ppo_config,
             model=self.model,
             ref_model=None,
             tokenizer=self.tokenizer,
-            dataset=dataset
+            dataset=dataset,
+            data_collator=data_collator
         )
         
         # Generation config

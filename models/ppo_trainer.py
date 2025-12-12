@@ -210,21 +210,18 @@ class PPOModelTrainer:
         # Prepare dataset
         dataset = self.prepare_dataset(samples)
         
-        # PPO Config
+        # PPO Config (updated for trl >= 0.8.0)
         ppo_config = PPOConfig(
             learning_rate=1e-5,
             batch_size=settings.training.batch_size,
             mini_batch_size=1,
             gradient_accumulation_steps=4,
-            ppo_epochs=4,
+            num_ppo_epochs=4,
             max_grad_norm=1.0,
-            kl_penalty="kl",
-            target_kl=0.1,
-            init_kl_coef=0.2,
+            kl_coef=0.2,
             seed=42,
             log_with=None,
-            use_score_scaling=True,
-            use_score_norm=True
+            whiten_rewards=True
         )
         
         # Initialize trainer

@@ -1,5 +1,6 @@
 """
 PPO Training with TRL - Using Rating-based Rewards
+Compatible with trl>=0.7.0,<0.11.0
 """
 import logging
 from pathlib import Path
@@ -7,14 +8,23 @@ from typing import List, Dict, Optional
 
 import torch
 from datasets import Dataset
-from transformers import AutoTokenizer, BitsAndBytesConfig
-from trl import PPOTrainer, PPOConfig, AutoModelForCausalLMWithValueHead
-from peft import LoraConfig
+from transformers import AutoTokenizer, BitsAndBytesConfig, AutoModelForCausalLM
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from tqdm import tqdm
 
 from config import settings
 
 logger = logging.getLogger(__name__)
+
+
+# Try to import from the correct location based on trl version
+try:
+    from trl import PPOTrainer, PPOConfig, AutoModelForCausalLMWithValueHead
+    TRL_LEGACY = True
+except ImportError:
+    # Newer trl versions have moved PPO to experimental
+    from trl.trainer import PPOTrainer, PPOConfig
+    TRL_LEGACY = False
 
 
 class PPOModelTrainer:
@@ -67,21 +77,40 @@ class PPOModelTrainer:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         self.tokenizer.padding_side = "left"
         
-        # Policy model kwargs
-        model_kwargs = {
-            "device_map": "auto",
-            "trust_remote_code": True,
-            "peft_config": self._get_lora_config()
-        }
-        
-        if use_quantization and torch.cuda.is_available():
-            model_kwargs["quantization_config"] = self._get_quantization_config()
-        
-        # Load policy model with value head
-        self.model = AutoModelForCausalLMWithValueHead.from_pretrained(
-            settings.model.base_model,
-            **model_kwargs
-        )
+        if TRL_LEGACY:
+            # Legacy trl: use AutoModelForCausalLMWithValueHead
+            model_kwargs = {
+                "device_map": "auto",
+                "trust_remote_code": True,
+                "peft_config": self._get_lora_config()
+            }
+            
+            if use_quantization and torch.cuda.is_available():
+                model_kwargs["quantization_config"] = self._get_quantization_config()
+            
+            self.model = AutoModelForCausalLMWithValueHead.from_pretrained(
+                settings.model.base_model,
+                **model_kwargs
+            )
+        else:
+            # Newer trl: load base model and apply LoRA manually
+            model_kwargs = {
+                "device_map": "auto",
+                "trust_remote_code": True,
+            }
+            
+            if use_quantization and torch.cuda.is_available():
+                model_kwargs["quantization_config"] = self._get_quantization_config()
+            
+            base_model = AutoModelForCausalLM.from_pretrained(
+                settings.model.base_model,
+                **model_kwargs
+            )
+            
+            if use_quantization:
+                base_model = prepare_model_for_kbit_training(base_model)
+            
+            self.model = get_peft_model(base_model, self._get_lora_config())
         
         logger.info("✅ Policy model loaded")
 
@@ -210,17 +239,16 @@ class PPOModelTrainer:
         # Prepare dataset
         dataset = self.prepare_dataset(samples)
         
-        # PPO Config (updated for trl >= 0.8.0)
+        # PPO Config - minimal compatible config
         ppo_config = PPOConfig(
             learning_rate=1e-5,
             batch_size=settings.training.batch_size,
-            num_mini_batches=1,
+            mini_batch_size=1,
             gradient_accumulation_steps=4,
-            num_ppo_epochs=4,
+            ppo_epochs=4,
             max_grad_norm=1.0,
-            kl_coef=0.2,
+            init_kl_coef=0.2,
             seed=42,
-            whiten_rewards=True
         )
         
         # Initialize trainer
@@ -319,7 +347,12 @@ class PPOModelTrainer:
         if self.model is None or self.tokenizer is None:
             raise RuntimeError("Model not loaded")
         
-        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.pretrained_model.device)
+        if TRL_LEGACY:
+            device = self.model.pretrained_model.device
+        else:
+            device = self.model.device
+            
+        inputs = self.tokenizer(prompt, return_tensors="pt").to(device)
         
         with torch.no_grad():
             outputs = self.model.generate(

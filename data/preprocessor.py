@@ -35,6 +35,15 @@ class DataPreprocessor:
             Cleaned DataFrame with valid ratings
         """
         logger.info("🔧 Cleaning feedback data...")
+        logger.info(f"   📋 Input shape: {df.shape}")
+        logger.info(f"   📋 Columns: {list(df.columns)}")
+        
+        # Debug: Show sample raw data
+        if len(df) > 0:
+            logger.info(f"   🔍 Sample raw data (first row):")
+            for col in df.columns:
+                val = df.iloc[0][col]
+                logger.info(f"      {col}: {repr(val)[:100]}")
         
         # Make a copy
         df = df.copy()

@@ -142,8 +142,15 @@ class DataExtractor:
         
         logger.info(f"📊 Extracted {len(df)} feedback records")
         
+        # Debug: Show raw data from pandas
         if len(df) > 0:
             logger.info(f"   📋 Columns: {list(df.columns)}")
+            logger.info(f"   🔍 First 3 rows RAW DATA:")
+            for idx, row in df.head(3).iterrows():
+                logger.info(f"      Row {idx}:")
+                logger.info(f"         rating: {repr(row.get('rating', 'N/A'))}")
+                logger.info(f"         question: {repr(str(row.get('question', 'N/A'))[:50])}")
+                logger.info(f"         answer: {repr(str(row.get('answer', 'N/A'))[:50])}")
             logger.info(f"   📋 Sample ratings: {df['rating'].value_counts().to_dict() if 'rating' in df.columns else 'N/A'}")
         else:
             logger.warning("   ⚠️ No feedback records found! Check:")

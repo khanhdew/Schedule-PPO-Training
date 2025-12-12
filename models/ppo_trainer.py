@@ -309,23 +309,29 @@ class PPOModelTrainer:
             for batch_idx, batch in enumerate(tqdm(self.ppo_trainer.dataloader)):
                 query_tensors = batch['input_ids']
                 
-                # Generate responses
-                response_tensors = []
-                for query in query_tensors:
-                    response = self.ppo_trainer.generate(
-                        query.unsqueeze(0),
-                        **generation_kwargs
-                    ).squeeze()
-                    response_tensors.append(response)
+                # Convert padded batch to list of 1D tensors (remove padding)
+                query_list = []
+                for i in range(len(query_tensors)):
+                    # Get the non-padded portion
+                    query = query_tensors[i]
+                    # Remove padding tokens (assume pad_token_id at the start due to left padding)
+                    mask = query != self.tokenizer.pad_token_id
+                    query_list.append(query[mask])
+                
+                # Generate responses - pass list of 1D tensors
+                response_tensors = self.ppo_trainer.generate(
+                    query_list,
+                    **generation_kwargs
+                )
                 
                 # Decode texts
                 query_texts = [
                     self.tokenizer.decode(q, skip_special_tokens=True)
-                    for q in query_tensors
+                    for q in query_list
                 ]
                 response_texts = [
                     self.tokenizer.decode(r[len(q):], skip_special_tokens=True)
-                    for q, r in zip(query_tensors, response_tensors)
+                    for q, r in zip(query_list, response_tensors)
                 ]
                 
                 # Compute rewards (from cache or neutral)
@@ -338,8 +344,8 @@ class PPOModelTrainer:
                         cached_hits += 1
                     total_samples += 1
                 
-                # PPO step
-                stats = self.ppo_trainer.step(query_tensors, response_tensors, rewards)
+                # PPO step - pass list of 1D tensors
+                stats = self.ppo_trainer.step(query_list, response_tensors, rewards)
                 
                 # Log
                 if batch_idx % 10 == 0:

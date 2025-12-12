@@ -88,7 +88,7 @@ class DataExtractor:
         Returns:
             DataFrame with feedback records
         """
-        print("📊 Extracting feedback data...")  # Use print for notebook
+        print("📊 Extracting feedback data...")
         print(f"   🔗 DB: {self.config.host}:{self.config.port}/{self.config.name}")
         
         conn = self.get_connection()
@@ -110,22 +110,6 @@ class DataExtractor:
         annotation_count = cursor.fetchone()['cnt']
         print(f"   📝 Messages with annotations: {annotation_count}")
         
-        # Also check the structure - let's see a sample annotated message
-        sample_query = """
-        SELECT 
-            message.value::json as msg_json
-        FROM chat t 
-        CROSS JOIN LATERAL json_each(t.chat::json#>'{history, messages}') as message
-        WHERE message.value::json->'annotation' IS NOT NULL
-        LIMIT 1
-        """
-        cursor.execute(sample_query)
-        sample = cursor.fetchone()
-        if sample:
-            print(f"   🔍 Sample annotated message: {str(sample['msg_json'])[:500]}...")
-        else:
-            print("   ⚠️ No annotated messages found!")
-        
         query = FEEDBACK_QUERY
         if days_back:
             cutoff = datetime.now() - timedelta(days=days_back)
@@ -134,13 +118,23 @@ class DataExtractor:
                 f"AND to_timestamp((message.value::json->>'timestamp')::bigint) > '{cutoff}'\nORDER BY datetime DESC"
             )
         
-        df = pd.read_sql(query, conn)
+        # Use cursor.execute instead of pd.read_sql to avoid parsing issues
+        cursor.execute(query)
+        rows = cursor.fetchall()
+        
+        # Convert to DataFrame manually
+        if rows:
+            # RealDictCursor returns dict-like rows
+            df = pd.DataFrame([dict(row) for row in rows])
+        else:
+            df = pd.DataFrame()
+        
         cursor.close()
         conn.close()
         
         print(f"📊 Extracted {len(df)} feedback records")
         
-        # Debug: Show raw data from pandas
+        # Debug: Show raw data
         if len(df) > 0:
             print(f"   📋 Columns: {list(df.columns)}")
             print(f"   🔍 First 3 rows RAW DATA:")

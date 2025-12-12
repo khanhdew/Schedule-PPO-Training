@@ -214,13 +214,12 @@ class PPOModelTrainer:
         ppo_config = PPOConfig(
             learning_rate=1e-5,
             batch_size=settings.training.batch_size,
-            mini_batch_size=1,
+            num_mini_batches=1,
             gradient_accumulation_steps=4,
             num_ppo_epochs=4,
             max_grad_norm=1.0,
             kl_coef=0.2,
             seed=42,
-            log_with=None,
             whiten_rewards=True
         )
         

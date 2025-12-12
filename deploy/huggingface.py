@@ -40,11 +40,16 @@ class HuggingFaceDeployer:
         """
         logger.info("🔀 Merging LoRA weights...")
         
-        # Load base model
+        # Create offload directory for large models
+        offload_dir = Path("./offload_temp")
+        offload_dir.mkdir(exist_ok=True)
+        
+        # Load base model with offloading support
         base_model = AutoModelForCausalLM.from_pretrained(
             settings.model.base_model,
             device_map="auto",
-            trust_remote_code=True
+            trust_remote_code=True,
+            offload_folder=str(offload_dir)
         )
         
         # Load tokenizer
@@ -53,8 +58,12 @@ class HuggingFaceDeployer:
             trust_remote_code=True
         )
         
-        # Load and merge LoRA
-        model = PeftModel.from_pretrained(base_model, lora_model_path)
+        # Load and merge LoRA - don't use device_map in PeftModel
+        model = PeftModel.from_pretrained(
+            base_model, 
+            lora_model_path,
+            is_trainable=False
+        )
         merged_model = model.merge_and_unload()
         
         logger.info("✅ LoRA weights merged")

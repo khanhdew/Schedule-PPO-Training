@@ -1,13 +1,13 @@
 """
 Data extraction from OpenWebUI PostgreSQL database
+Uses SQLAlchemy for reliable data extraction
 """
 import logging
 from datetime import datetime, timedelta
 from typing import Optional
 
 import pandas as pd
-import psycopg2
-from psycopg2.extras import RealDictCursor
+from sqlalchemy import create_engine, text
 
 from config import settings
 
@@ -51,31 +51,34 @@ LIMIT 1000;
 
 
 class DataExtractor:
-    """Extract feedback data from OpenWebUI database"""
+    """Extract feedback data from OpenWebUI database using SQLAlchemy"""
 
     def __init__(self):
         self.config = settings.db
+        self._engine = None
 
-    def get_connection(self):
-        """Create database connection"""
-        return psycopg2.connect(
-            host=self.config.host,
-            port=self.config.port,
-            dbname=self.config.name,
-            user=self.config.user,
-            password=self.config.password,
-            cursor_factory=RealDictCursor
-        )
+    def get_engine(self):
+        """Create SQLAlchemy engine (singleton)"""
+        if self._engine is None:
+            connection_string = (
+                f"postgresql://{self.config.user}:{self.config.password}"
+                f"@{self.config.host}:{self.config.port}/{self.config.name}"
+            )
+            self._engine = create_engine(connection_string)
+            print(f"   ✅ Created SQLAlchemy engine")
+        return self._engine
 
     def test_connection(self) -> bool:
         """Test database connectivity"""
         try:
-            conn = self.get_connection()
-            conn.close()
-            logger.info("✅ Database connection successful")
+            engine = self.get_engine()
+            with engine.connect() as conn:
+                result = conn.execute(text("SELECT 1"))
+                result.fetchone()
+            print("✅ Database connection successful")
             return True
         except Exception as e:
-            logger.error(f"❌ Database connection failed: {e}")
+            print(f"❌ Database connection failed: {e}")
             return False
 
     def extract_feedback(self, days_back: Optional[int] = None) -> pd.DataFrame:
@@ -91,58 +94,63 @@ class DataExtractor:
         print("📊 Extracting feedback data...")
         print(f"   🔗 DB: {self.config.host}:{self.config.port}/{self.config.name}")
         
-        conn = self.get_connection()
-        cursor = conn.cursor()
+        engine = self.get_engine()
         
-        # First, let's check how many chats exist
-        cursor.execute("SELECT COUNT(*) as cnt FROM chat")
-        chat_count = cursor.fetchone()['cnt']
-        print(f"   📁 Total chats in database: {chat_count}")
-        
-        # Check if any messages have annotations
-        check_query = """
-        SELECT COUNT(*) as cnt
-        FROM chat t 
-        CROSS JOIN LATERAL json_each(t.chat::json#>'{history, messages}') as message
-        WHERE message.value::json->'annotation' IS NOT NULL
-        """
-        cursor.execute(check_query)
-        annotation_count = cursor.fetchone()['cnt']
-        print(f"   📝 Messages with annotations: {annotation_count}")
-        
-        query = FEEDBACK_QUERY
-        if days_back:
-            cutoff = datetime.now() - timedelta(days=days_back)
-            query = query.replace(
-                "ORDER BY datetime DESC",
-                f"AND to_timestamp((message.value::json->>'timestamp')::bigint) > '{cutoff}'\nORDER BY datetime DESC"
-            )
-        
-        # Use cursor.execute instead of pd.read_sql to avoid parsing issues
-        cursor.execute(query)
-        rows = cursor.fetchall()
-        
-        # Convert to DataFrame manually
-        if rows:
-            # RealDictCursor returns dict-like rows
-            df = pd.DataFrame([dict(row) for row in rows])
-        else:
-            df = pd.DataFrame()
-        
-        cursor.close()
-        conn.close()
+        with engine.connect() as conn:
+            # Check total chats
+            result = conn.execute(text("SELECT COUNT(*) as cnt FROM chat"))
+            chat_count = result.fetchone()[0]
+            print(f"   📁 Total chats in database: {chat_count}")
+            
+            # Check annotations count
+            check_query = """
+            SELECT COUNT(*) as cnt
+            FROM chat t 
+            CROSS JOIN LATERAL json_each(t.chat::json#>'{history, messages}') as message
+            WHERE message.value::json->'annotation' IS NOT NULL
+            """
+            result = conn.execute(text(check_query))
+            annotation_count = result.fetchone()[0]
+            print(f"   📝 Messages with annotations: {annotation_count}")
+            
+            # Debug: Get one raw annotated message to see structure
+            debug_query = """
+            SELECT 
+                message.value::json as raw_message
+            FROM chat t 
+            CROSS JOIN LATERAL json_each(t.chat::json#>'{history, messages}') as message
+            WHERE message.value::json->'annotation' IS NOT NULL
+            LIMIT 1
+            """
+            result = conn.execute(text(debug_query))
+            row = result.fetchone()
+            if row:
+                print(f"   🔍 Raw message structure: {str(row[0])[:300]}...")
+            
+            # Build query
+            query = FEEDBACK_QUERY
+            if days_back:
+                cutoff = datetime.now() - timedelta(days=days_back)
+                query = query.replace(
+                    "ORDER BY datetime DESC",
+                    f"AND to_timestamp((message.value::json->>'timestamp')::bigint) > '{cutoff}'\nORDER BY datetime DESC"
+                )
+            
+            # Execute main query with pandas
+            df = pd.read_sql(text(query), conn)
         
         print(f"📊 Extracted {len(df)} feedback records")
         
-        # Debug: Show raw data
+        # Debug output
         if len(df) > 0:
             print(f"   📋 Columns: {list(df.columns)}")
-            print(f"   🔍 First 3 rows RAW DATA:")
-            for idx, row in df.head(3).iterrows():
+            print(f"   🔍 First 3 rows:")
+            for idx in range(min(3, len(df))):
+                row = df.iloc[idx]
                 print(f"      Row {idx}:")
-                print(f"         rating: {repr(row.get('rating', 'N/A'))}")
-                print(f"         question: {repr(str(row.get('question', 'N/A'))[:80])}")
-                print(f"         answer: {repr(str(row.get('answer', 'N/A'))[:80])}")
+                print(f"         rating: {repr(row['rating'])}")
+                print(f"         question: {repr(str(row['question'])[:80]) if row['question'] else 'None'}")
+                print(f"         answer: {repr(str(row['answer'])[:80]) if row['answer'] else 'None'}")
         else:
             print("   ⚠️ No feedback records found!")
         
@@ -158,15 +166,16 @@ class DataExtractor:
         Returns:
             DataFrame with unrated responses
         """
-        logger.info("📊 Extracting unrated responses...")
+        print("📊 Extracting unrated responses...")
         
-        conn = self.get_connection()
+        engine = self.get_engine()
         
         query = UNRATED_QUERY.replace("LIMIT 1000", f"LIMIT {limit}")
-        df = pd.read_sql(query, conn)
-        conn.close()
         
-        logger.info(f"📊 Extracted {len(df)} unrated responses")
+        with engine.connect() as conn:
+            df = pd.read_sql(text(query), conn)
+        
+        print(f"📊 Extracted {len(df)} unrated responses")
         return df
 
 

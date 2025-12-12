@@ -212,7 +212,6 @@ class PPOModelTrainer:
         
         # PPO Config
         ppo_config = PPOConfig(
-            model_name=settings.model.base_model,
             learning_rate=1e-5,
             batch_size=settings.training.batch_size,
             mini_batch_size=1,
